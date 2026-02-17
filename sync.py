@@ -64,8 +64,8 @@ def _get_prop_text(prop: dict) -> str:
 
 def notion_list_maoer_rows():
     """
-    从 Notion 数据库拉取 Platform=猫耳 的所有行。
-    你只需要在 Notion 里新增一行并填 Platform + Work URL/Work ID，就会自动纳入同步。
+    拉取 Platform=猫耳 的所有行。
+    注意：新行必须把 Platform 选成猫耳，否则不会被纳入同步。
     """
     url = f"https://api.notion.com/v1/databases/{NOTION_DB_ID}/query"
     body = {"page_size": 100, "filter": {"property": "Platform", "select": {"equals": "猫耳"}}}
@@ -85,8 +85,8 @@ def notion_list_maoer_rows():
             props = page.get("properties", {})
             page_id = page.get("id")
 
-            work_url = _get_prop_text(props.get("Work URL"))
-            work_id_text = _get_prop_text(props.get("Work ID"))
+            work_url = _get_prop_text(props.get("Work URL")).strip()
+            work_id_text = _get_prop_text(props.get("Work ID")).strip()
             main_cv_override = _get_prop_text(props.get("Main CV Override")).strip()
 
             rows.append(
@@ -152,9 +152,8 @@ def maoer_get_episode_details(work_id: int) -> dict:
         headers=maoer_headers(work_id),
         timeout=30,
     )
-    print("MAOER status:", r.status_code)
-    print("MAOER content-type:", r.headers.get("content-type", ""))
     if r.status_code != 200:
+        print("MAOER episode_details HTTP", r.status_code)
         print("MAOER head:", r.text[:300])
     r.raise_for_status()
 
@@ -176,13 +175,7 @@ MUSIC_WORDS_STRONG = [
 ]
 
 
-def pick_main_cvs(cvs: list, k: int = 2) -> str:
-    """
-    自动挑“更像主役”的 k 位：
-    - 强过滤：音乐相关（演唱/主题曲/片尾曲...）直接剔除
-    - 过滤：明显制作/旁白等非角色
-    - 再按“角色名像不像角色”打分排序
-    """
+def pick_main_cvs(cvs: list, k: int = 4) -> str:
     candidates = []
 
     for item in cvs or []:
@@ -208,14 +201,14 @@ def pick_main_cvs(cvs: list, k: int = 2) -> str:
             score += 20
             if "/" in character:
                 score -= 4
-            if len(character) > 8:
+            if len(character) > 10:
                 score -= 3
         else:
             score -= 10
 
         candidates.append((score, character, name, group))
 
-    # 兜底：过滤太狠不足 k 个时，允许一些“杂角色”但仍排除音乐/制作
+    # 兜底：过滤太狠导致不足 k 个时，退一步但仍排除音乐/制作
     if len(candidates) < k:
         for item in cvs or []:
             character = (item.get("character") or "").strip()
@@ -241,10 +234,7 @@ def pick_main_cvs(cvs: list, k: int = 2) -> str:
     out = []
     for _, character, name, group in top:
         left = character if character else "角色未标注"
-        if group:
-            out.append(f"{left} - {name}({group})")
-        else:
-            out.append(f"{left} - {name}")
+        out.append(f"{left} - {name}{f'({group})' if group else ''}")
 
     return "; ".join(out)
 
@@ -286,18 +276,26 @@ def maoer_fetch(work_id: int) -> dict:
         "is_serial": is_serial,
         "newest_title": newest_title,
         "latest_count": latest_count,
-        "cv_text": pick_main_cvs(cvs, k=2),
+        "cv_text": pick_main_cvs(cvs, k=4),  # ← 默认写前4位
         "last_sync": now_iso,
     }
 
 
 def parse_work_id(work_url: str, fallback: str):
-    # 兼容：/mdrama/91093 或 /mdrama/drama/26870
-    m = re.search(r"/mdrama/(?:drama/)?(\d+)", work_url or "")
+    """
+    兼容：
+    - https://www.missevan.com/mdrama/91093
+    - https://www.missevan.com/mdrama/drama/26870
+    - 只要 URL 里出现 /mdrama/数字 或 /mdrama/drama/数字 都能抓出来
+    """
+    u = (work_url or "").strip()
+    m = re.search(r"/mdrama/(?:drama/)?(\d+)", u)
     if m:
         return int(m.group(1))
+
     if fallback and fallback.isdigit():
         return int(fallback)
+
     return None
 
 
@@ -315,7 +313,7 @@ def notion_properties_for_work(work_id: int, work_url: str, data: dict):
         "Last Sync": {"date": {"start": data.get("last_sync")}},
     }
 
-    # 如果你在 Notion 里有 CV 字段（rich_text），就写进去
+    # CV 字段（rich_text）
     if data.get("cv_text"):
         props["CV"] = {"rich_text": [{"text": {"content": data["cv_text"]}}]}
 
@@ -338,12 +336,15 @@ def main():
         work_id = parse_work_id(work_url, row["work_id_text"])
 
         if not work_id:
-            print("skip: cannot parse Work ID from row", page_id, work_url, row["work_id_text"])
+            print("SKIP (cannot parse Work ID). page:", page_id)
+            print("  Work URL:", work_url)
+            print("  Work ID:", row["work_id_text"])
+            print("  Tip: 确保 Platform=猫耳，并且 Work URL 含 /mdrama/数字")
             continue
 
         data = maoer_fetch(work_id)
 
-        # B：Notion 手动兜底优先
+        # B：Notion 手动兜底优先（你填了就永远用你填的）
         override = (row.get("main_cv_override") or "").strip()
         if override:
             data["cv_text"] = override
