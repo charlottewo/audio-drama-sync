@@ -2,31 +2,22 @@ import os
 import re
 import requests
 from datetime import datetime, timezone
+from typing import Any
 
 # ====== ENV ======
 NOTION_TOKEN = os.environ["NOTION_TOKEN"]
 NOTION_DB_ID = os.environ["NOTION_DB_ID"]
 MISSEVAN_COOKIE = os.environ.get("MISSEVAN_COOKIE", "")
 
-# ====== Maoer / MissEvan APIs ======
+# ====== MissEvan APIs ======
 GET_DRAMA = "https://www.missevan.com/dramaapi/getdrama"
 GET_EPISODE_DETAILS = "https://www.missevan.com/dramaapi/getdramaepisodedetails"
 
-UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-
-# ====== Notion property names (按你数据库列名来) ======
-PROP_TITLE = "Title"
-PROP_PLATFORM = "Platform"
-PROP_WORK_ID = "Work ID"
-PROP_WORK_URL = "Work URL"
-PROP_COVER_URL = "Cover URL"
-PROP_IS_SERIAL = "Is Serial"
-PROP_LATEST_NO = "Latest Episode No"
-PROP_LAST_SYNC = "Last Sync"
-PROP_PRICE = "Price"
-PROP_CV = "CV"
-PROP_CV_OVERRIDE = "Main CV Override"   # 你手动填主役，用来 override 自动抓取
-
+UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/122.0.0.0 Safari/537.36"
+)
 
 # =========================
 # Notion helpers
@@ -38,12 +29,10 @@ def notion_headers():
         "Content-Type": "application/json",
     }
 
-
 def notion_cover_payload(cover_url: str | None):
     if not cover_url:
         return None
     return {"type": "external", "external": {"url": cover_url}}
-
 
 def notion_healthcheck():
     r = requests.get("https://api.notion.com/v1/users/me", headers=notion_headers(), timeout=30)
@@ -52,7 +41,6 @@ def notion_healthcheck():
         print(r.text[:400])
     r.raise_for_status()
 
-
 def notion_db_check():
     r = requests.get(f"https://api.notion.com/v1/databases/{NOTION_DB_ID}", headers=notion_headers(), timeout=30)
     print("NOTION /databases/{id}:", r.status_code)
@@ -60,36 +48,44 @@ def notion_db_check():
         print(r.text[:400])
     r.raise_for_status()
 
-
 def _get_prop_text(prop: dict) -> str:
+    """Read rich_text/title/url/select plain text from a Notion property."""
     if not prop:
         return ""
     t = prop.get("type")
     if t == "rich_text":
-        return "".join([x.get("plain_text", "") for x in prop.get("rich_text", [])])
+        return "".join([x.get("plain_text", "") for x in prop.get("rich_text", [])]).strip()
     if t == "title":
-        return "".join([x.get("plain_text", "") for x in prop.get("title", [])])
+        return "".join([x.get("plain_text", "") for x in prop.get("title", [])]).strip()
     if t == "url":
-        return prop.get("url") or ""
+        return (prop.get("url") or "").strip()
     if t == "select":
         s = prop.get("select")
-        return (s or {}).get("name", "") if s else ""
+        return ((s or {}).get("name", "") if s else "").strip()
     if t == "number":
         v = prop.get("number")
         return "" if v is None else str(v)
+    if t == "formula":
+        # formula 读值时会在 prop["formula"] 里
+        f = prop.get("formula") or {}
+        # 可能是 string/number/boolean/date
+        for k in ("string", "number", "boolean"):
+            if k in f and f[k] is not None:
+                return str(f[k]).strip()
+        if "date" in f and f["date"]:
+            # date 对我们没用，返回空
+            return ""
     return ""
-
 
 def notion_list_maoer_rows():
     """
     拉取 Platform=猫耳 的所有行。
-    新增剧集：新建一行，Platform选猫耳，填 Work URL 或 Work ID。
-    CV override：Main CV Override 你手填就生效。
+    新增剧集：只要新建一行，Platform 选猫耳，填 Work URL 或 Work ID。
     """
     url = f"https://api.notion.com/v1/databases/{NOTION_DB_ID}/query"
     body = {
         "page_size": 100,
-        "filter": {"property": PROP_PLATFORM, "select": {"equals": "猫耳"}},
+        "filter": {"property": "Platform", "select": {"equals": "猫耳"}},
     }
 
     rows = []
@@ -105,12 +101,18 @@ def notion_list_maoer_rows():
 
         for page in data.get("results", []):
             props = page.get("properties", {})
+            page_id = page.get("id")
+
+            work_url = _get_prop_text(props.get("Work URL"))
+            work_id_text = _get_prop_text(props.get("Work ID"))
+            main_cv_override = _get_prop_text(props.get("Main CV Override"))
+
             rows.append(
                 {
-                    "page_id": page.get("id"),
-                    "work_url": _get_prop_text(props.get(PROP_WORK_URL)).strip(),
-                    "work_id_text": _get_prop_text(props.get(PROP_WORK_ID)).strip(),
-                    "cv_override": _get_prop_text(props.get(PROP_CV_OVERRIDE)).strip(),
+                    "page_id": page_id,
+                    "work_url": work_url,
+                    "work_id_text": work_id_text,
+                    "main_cv_override": main_cv_override,
                 }
             )
 
@@ -120,11 +122,10 @@ def notion_list_maoer_rows():
 
     return rows
 
-
 def notion_update_page(page_id: str, properties: dict, cover_url: str | None = None):
     url = f"https://api.notion.com/v1/pages/{page_id}"
-    body = {"properties": properties}
 
+    body: dict[str, Any] = {"properties": properties}
     cover = notion_cover_payload(cover_url)
     if cover:
         body["cover"] = cover
@@ -135,9 +136,8 @@ def notion_update_page(page_id: str, properties: dict, cover_url: str | None = N
         print(r.text[:800])
     r.raise_for_status()
 
-
 # =========================
-# Maoer helpers
+# MissEvan helpers
 # =========================
 def maoer_headers(work_id: int):
     h = {
@@ -152,7 +152,6 @@ def maoer_headers(work_id: int):
         h["Cookie"] = MISSEVAN_COOKIE
     return h
 
-
 def maoer_get_drama(work_id: int) -> dict:
     r = requests.get(GET_DRAMA, params={"drama_id": work_id}, headers=maoer_headers(work_id), timeout=30)
     if r.status_code != 200:
@@ -163,7 +162,6 @@ def maoer_get_drama(work_id: int) -> dict:
     info = j.get("info", {})
     drama = info.get("drama", info.get("Drama", {})) if isinstance(info, dict) else {}
     return {"drama": drama or {}}
-
 
 def maoer_get_episode_details(work_id: int) -> dict:
     r = requests.get(
@@ -178,12 +176,81 @@ def maoer_get_episode_details(work_id: int) -> dict:
     r.raise_for_status()
 
     j = r.json()
-    return {"info": j.get("info", {}) or {}}
+    info = j.get("info", {})
+    return {"info": info or {}}
 
+def _extract_cv_names_from_drama(drama: dict) -> list[str]:
+    """
+    尽量从 getdrama 的 drama 里抽 CV 名单（字段不稳定，做容错）。
+    我们只要“展示用”，所以拿到能用的就行。
+    """
+    if not isinstance(drama, dict):
+        return []
+
+    candidates: list[str] = []
+
+    # 常见：cvs: [{name:...}, ...]
+    cvs = drama.get("cvs") or drama.get("Cvs") or drama.get("CVS")
+    if isinstance(cvs, list):
+        for item in cvs:
+            if isinstance(item, dict):
+                n = item.get("name") or item.get("nickname") or item.get("uname")
+                if n:
+                    candidates.append(str(n).strip())
+            elif isinstance(item, str):
+                candidates.append(item.strip())
+
+    # 有些会直接给字符串
+    cv_str = drama.get("cv") or drama.get("CV")
+    if isinstance(cv_str, str) and cv_str.strip():
+        # 可能是 "A/B/C" 之类
+        parts = re.split(r"[、/，,·\s]+", cv_str.strip())
+        candidates.extend([p for p in (x.strip() for x in parts) if p])
+
+    # 去重保序
+    seen = set()
+    out = []
+    for n in candidates:
+        if n and n not in seen:
+            seen.add(n)
+            out.append(n)
+    return out
 
 # =========================
-# Parsing
+# Fetch + parse
 # =========================
+def maoer_fetch(work_id: int) -> dict:
+    meta = maoer_get_drama(work_id)               # 标题/封面/价格/连载/（可能含CV）
+    detail = maoer_get_episode_details(work_id)   # pagination.count 作为总集数
+
+    drama = meta.get("drama", {})
+    info = detail.get("info", {})
+
+    title = drama.get("name")
+    cover_url = drama.get("cover")
+    is_serial = bool(drama.get("serialize"))
+    price = drama.get("price")  # 可能是 int/float/None
+
+    # “更新到第几集”：用 pagination.count（总条数）
+    latest_count = None
+    if isinstance(info, dict):
+        pag = info.get("pagination", {})
+        if isinstance(pag, dict) and pag.get("count") is not None:
+            latest_count = pag.get("count")
+
+    cv_names = _extract_cv_names_from_drama(drama)
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    return {
+        "title": title,
+        "cover_url": cover_url,
+        "is_serial": is_serial,
+        "latest_count": latest_count,
+        "price": price,
+        "cv_names": cv_names,  # list[str]
+        "last_sync": now_iso,
+    }
+
 def parse_work_id(work_url: str, fallback: str):
     """
     兼容：
@@ -194,99 +261,51 @@ def parse_work_id(work_url: str, fallback: str):
     m = re.search(r"/mdrama/(?:drama/)?(\d+)", u)
     if m:
         return int(m.group(1))
+
     if fallback and fallback.isdigit():
         return int(fallback)
+
     return None
 
+def _rt(text: str):
+    return {"rich_text": [{"text": {"content": text}}]}
 
-def clean_cv_list(cvs: list, limit: int = 4) -> list[str]:
+def notion_properties_for_work(work_id: int, work_url: str, data: dict, main_cv_override: str):
     """
-    cvs 元素形如：
-    {"character": "...", "cv_info": {"name": "..."}}
-    过滤掉“演唱/主题曲/片尾曲/歌曲”等更像歌手信息的条目。
+    重点：
+    - CV：优先 Main CV Override；否则取抓到的前4位；如果抓不到就【不更新CV】（避免清空）。
     """
-    bad_kw = ("演唱", "主题曲", "片尾曲", "歌曲", "插曲", "曲", "歌")
-    names = []
-    for item in cvs or []:
-        character = (item.get("character") or "").strip()
-        cv_info = item.get("cv_info") or {}
-        name = (cv_info.get("name") or "").strip()
-        if not name:
-            continue
-        if any(k in character for k in bad_kw):
-            continue
-        # 去重（保持顺序）
-        if name not in names:
-            names.append(name)
-        if len(names) >= limit:
-            break
-    return names
-
-
-def maoer_fetch(work_id: int) -> dict:
-    meta = maoer_get_drama(work_id)               # title/cover/price/serialize
-    detail = maoer_get_episode_details(work_id)   # pagination + cvs
-
-    drama = meta.get("drama", {})
-    info = detail.get("info", {})
-
-    title = drama.get("name")
-    cover_url = drama.get("cover")
-    is_serial = bool(drama.get("serialize"))
-
-    price = drama.get("price")  # 这里就是 199 这种（钻石/标价），你 Notion 里按 number 存
-
-    latest_count = None
-    if isinstance(info, dict):
-        pag = info.get("pagination", {})
-        if isinstance(pag, dict) and pag.get("count") is not None:
-            latest_count = pag.get("count")
-
-    cvs = []
-    if isinstance(info, dict):
-        cvs = info.get("cvs", []) or []
-
-    cv_names = clean_cv_list(cvs, limit=4)
-    cv_text = " / ".join(cv_names) if cv_names else ""
-
-    now_iso = datetime.now(timezone.utc).isoformat()
-
-    return {
-        "title": title,
-        "cover_url": cover_url,
-        "is_serial": is_serial,
-        "latest_count": latest_count,
-        "price": price,
-        "cv_text": cv_text,
-        "last_sync": now_iso,
+    props: dict[str, Any] = {
+        "Title": {"title": [{"text": {"content": data.get("title") or f"猫耳-{work_id}"}}]},
+        "Platform": {"select": {"name": "猫耳"}},
+        "Work ID": _rt(str(work_id)),
+        "Work URL": {"url": work_url or f"https://www.missevan.com/mdrama/{work_id}"},
+        "Is Serial": {"checkbox": bool(data.get("is_serial"))},
+        "Latest Episode No": {"number": data.get("latest_count")},
+        "Last Sync": {"date": {"start": data.get("last_sync")}},
+        "Cover URL": {"url": data.get("cover_url")},
     }
 
+    # Price：只有拿得到才写（拿不到就不动，避免写 None 导致你字段被清）
+    if data.get("price") is not None:
+        props["Price"] = {"number": data.get("price")}
 
-def notion_properties_for_work(work_id: int, work_url: str, data: dict, cv_override: str = ""):
-    """
-    写回 Notion：
-    - Title
-    - Latest Episode No
-    - Is Serial
-    - Price
-    - CV（支持 override）
-    """
-    cv_final = (cv_override or "").strip() or (data.get("cv_text") or "")
+    # CV：override > fetched top4 > 不更新（保留原有）
+    override = (main_cv_override or "").strip()
+    if override:
+        props["CV"] = _rt(override)
+        cv_debug = "(override)"
+    else:
+        cv_names = data.get("cv_names") or []
+        cv_top = [x for x in cv_names if x][:4]
+        if cv_top:
+            props["CV"] = _rt(" / ".join(cv_top))
+            cv_debug = " / ".join(cv_top)
+        else:
+            # 关键：不写 CV，就不会清空 Notion 原值
+            cv_debug = ""
 
-    props = {
-        PROP_TITLE: {"title": [{"text": {"content": data.get("title") or f"猫耳-{work_id}"}}]},
-        PROP_PLATFORM: {"select": {"name": "猫耳"}},
-        PROP_WORK_ID: {"rich_text": [{"text": {"content": str(work_id)}}]},
-        PROP_WORK_URL: {"url": work_url or f"https://www.missevan.com/mdrama/{work_id}"},
-        PROP_IS_SERIAL: {"checkbox": bool(data.get("is_serial"))},
-        PROP_LATEST_NO: {"number": data.get("latest_count")},
-        PROP_LAST_SYNC: {"date": {"start": data.get("last_sync")}},
-        PROP_COVER_URL: {"url": data.get("cover_url")},
-        PROP_PRICE: {"number": data.get("price") if isinstance(data.get("price"), (int, float)) else None},
-        PROP_CV: {"rich_text": [{"text": {"content": cv_final}}]},
-    }
-    return props
-
+    return props, cv_debug
 
 # =========================
 # Main
@@ -307,10 +326,16 @@ def main():
             print("SKIP (cannot parse Work ID). page:", page_id)
             print("  Work URL:", work_url)
             print("  Work ID:", row["work_id_text"])
+            print("  Tip: Platform 选猫耳，并确保 Work URL 含 /mdrama/数字")
             continue
 
         data = maoer_fetch(work_id)
-        props = notion_properties_for_work(work_id, work_url, data, cv_override=row.get("cv_override", ""))
+        props, cv_debug = notion_properties_for_work(
+            work_id=work_id,
+            work_url=work_url,
+            data=data,
+            main_cv_override=row.get("main_cv_override", ""),
+        )
 
         notion_update_page(page_id, props, cover_url=data.get("cover_url"))
 
@@ -321,10 +346,8 @@ def main():
             f"count={data.get('latest_count')}",
             f"serial={data.get('is_serial')}",
             f"price={data.get('price')}",
-            f"cv={data.get('cv_text')[:40]}",
-            "(override)" if (row.get("cv_override") or "").strip() else "",
+            f"cv={cv_debug}",
         )
-
 
 if __name__ == "__main__":
     main()
