@@ -42,6 +42,9 @@ def notion_update_page(page_id: str, properties: dict):
     url = f"https://api.notion.com/v1/pages/{page_id}"
     body = {"properties": properties}
     r = requests.patch(url, headers=notion_headers(), json=body, timeout=30)
+    if r.status_code != 200:
+        print("NOTION update failed:", r.status_code)
+        print(r.text[:800])
     r.raise_for_status()
 
 
@@ -104,9 +107,7 @@ def maoer_fetch(work_id: int):
 
 
 def notion_properties_for_work(work: dict, data: dict):
-    key = f"{work['platform']}:{work['work_id']}"
     props = {
-        "Key": {"rich_text": [{"text": {"content": key}}]},   # ← 就加这行
         "Title": {"title": [{"text": {"content": data["title"] or f"猫耳-{work['work_id']}"}}]},
         "Platform": {"select": {"name": work["platform"]}},
         "Work ID": {"rich_text": [{"text": {"content": str(work["work_id"])}}]},
