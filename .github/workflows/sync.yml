@@ -1,0 +1,26 @@
+name: Sync Audio Dramas
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "10 10 * * *"  # 每天 UTC 10:10（北京时间 18:10）
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install requests
+
+      - name: Run sync
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DB_ID: ${{ secrets.NOTION_DB_ID }}
+        run: python sync.py
