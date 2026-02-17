@@ -142,3 +142,14 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+cookie = os.environ.get("MISSEVAN_COOKIE")
+
+headers = {
+    "User-Agent": "Mozilla/5.0",
+    "Referer": f"https://www.missevan.com/mdrama/{work_id}",
+    "Origin": "https://www.missevan.com",
+}
+
+if cookie:
+    headers["Cookie"] = cookie
