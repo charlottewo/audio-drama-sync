@@ -144,12 +144,5 @@ if __name__ == "__main__":
     main()
 
 cookie = os.environ.get("MISSEVAN_COOKIE")
-
-headers = {
-    "User-Agent": "Mozilla/5.0",
-    "Referer": f"https://www.missevan.com/mdrama/{work_id}",
-    "Origin": "https://www.missevan.com",
-}
-
 if cookie:
-    headers["Cookie"] = buvid3=7F02FAB9-F5F9-2B13-9C3C-3EFF65B0350427087infoc; b_nut=1771329127; buvid4=D8BF1746-1B3B-07B3-4ABB-0F95AAE812FG27087-026021719-esYn7arnPa3Gm%2FbqEYUO0Q%3D%3D; equip_id=431291b4-0bf7-11f1-873e-8e7d7f14d277; token=699456b3aa45f24f1e635cae%7C3879680671d21e28%7C1771329203%7C440b8386ea9e2ff1; gray_uid=9698408; acw_tc=76b20fe117713353493491815e190e3ad3f5c10f26da22e92c41cc8a38e297; MSESSID=2mf2081290t031ti13458mbhla
+    headers["Cookie"] = cookie
