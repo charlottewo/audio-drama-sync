@@ -105,6 +105,18 @@ def maoer_fetch(work_id: int) -> Dict[str, Any]:
         headers["Cookie"] = MISSEVAN_COOKIE
 
     r = requests.get(MAOER_EPISODE_DETAILS, params=params, headers=headers, timeout=30)
+    print("MAOER status:", r.status_code)
+print("MAOER content-type:", r.headers.get("content-type"))
+print("MAOER head:", r.text[:200])
+
+try:
+    j = r.json()
+    print("MAOER json keys:", list(j.keys())[:20])
+    print("MAOER code/msg:", j.get("code"), j.get("msg"))
+except Exception as e:
+    print("MAOER json parse failed:", e)
+    raise
+
     if r.status_code != 200:
         print("MISSEVAN HTTP", r.status_code)
         print("Response head:", r.text[:300])
