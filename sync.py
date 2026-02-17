@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 NOTION_TOKEN = os.environ["NOTION_TOKEN"]
 NOTION_DB_ID = os.environ["NOTION_DB_ID"]
+MISSEVAN_COOKIE = os.environ.get("MISSEVAN_COOKIE", "")
 
 MAOER_EPISODE_DETAILS = "https://www.missevan.com/dramaapi/getdramaepisodedetails"
 
@@ -15,6 +16,7 @@ WORKS = [
     }
 ]
 
+
 def notion_headers():
     return {
         "Authorization": f"Bearer {NOTION_TOKEN}",
@@ -22,17 +24,19 @@ def notion_headers():
         "Content-Type": "application/json",
     }
 
+
 def notion_query_by_key(key: str):
     url = f"https://api.notion.com/v1/databases/{NOTION_DB_ID}/query"
     body = {
         "filter": {
             "property": "Key",
-            "formula": {"string": {"equals": key}}
+            "formula": {"string": {"equals": key}},
         }
     }
     r = requests.post(url, headers=notion_headers(), json=body, timeout=30)
     r.raise_for_status()
     return r.json().get("results", [])
+
 
 def notion_update_page(page_id: str, properties: dict):
     url = f"https://api.notion.com/v1/pages/{page_id}"
@@ -40,11 +44,14 @@ def notion_update_page(page_id: str, properties: dict):
     r = requests.patch(url, headers=notion_headers(), json=body, timeout=30)
     r.raise_for_status()
 
+
 def notion_create_page(properties: dict):
     url = "https://api.notion.com/v1/pages"
     body = {"parent": {"database_id": NOTION_DB_ID}, "properties": properties}
     r = requests.post(url, headers=notion_headers(), json=body, timeout=30)
     r.raise_for_status()
+
+
 def maoer_fetch(work_id: int):
     params = {"drama_id": work_id, "p": 1, "page_size": 10}
 
@@ -56,6 +63,9 @@ def maoer_fetch(work_id: int):
         "Origin": "https://www.missevan.com",
         "Connection": "keep-alive",
     }
+
+    if MISSEVAN_COOKIE:
+        headers["Cookie"] = MISSEVAN_COOKIE
 
     r = requests.get(MAOER_EPISODE_DETAILS, params=params, headers=headers, timeout=30)
 
@@ -91,23 +101,10 @@ def maoer_fetch(work_id: int):
         "latest_count": latest_count,
         "last_sync": now_iso,
     }
-    
-Traceback (most recent call last):
-  File "/home/runner/work/audio-drama-sync/audio-drama-sync/sync.py", line 116, in <module>
-    main()
-  File "/home/runner/work/audio-drama-sync/audio-drama-sync/sync.py", line 101, in main
-    data = maoer_fetch(w["work_id"])
-           ^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/runner/work/audio-drama-sync/audio-drama-sync/sync.py", line 52, in maoer_fetch
-    r.raise_for_status()
-  File "/opt/hostedtoolcache/Python/3.11.14/x64/lib/python3.11/site-packages/requests/models.py", line 1026, in raise_for_status
-    raise HTTPError(http_error_msg, response=self)
-requests.exceptions.HTTPError: 412 Client Error: Precondition Failed for url: https://www.missevan.com/dramaapi/getdramaepisodedetails?drama_id=91093&p=1&page_size=10
-Error: Process completed with exit code 1.
-##[debug]Finishing: Run sync
+
 
 def notion_properties_for_work(work: dict, data: dict):
-    props = {
+    return {
         "Title": {"title": [{"text": {"content": data["title"] or f"猫耳-{work['work_id']}"}}]},
         "Platform": {"select": {"name": work["platform"]}},
         "Work ID": {"rich_text": [{"text": {"content": str(work["work_id"])}}]},
@@ -119,7 +116,7 @@ def notion_properties_for_work(work: dict, data: dict):
         "Latest Episode No": {"number": data.get("latest_count")},
         "Last Sync": {"date": {"start": data.get("last_sync")}},
     }
-    return props
+
 
 def main():
     for w in WORKS:
@@ -140,9 +137,6 @@ def main():
             notion_create_page(props)
             print("created", w["work_id"], data.get("title"), data.get("newest_title"))
 
+
 if __name__ == "__main__":
     main()
-
-cookie = os.environ.get("MISSEVAN_COOKIE")
-if cookie:
-    headers["Cookie"] = cookie
