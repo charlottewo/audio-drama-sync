@@ -86,45 +86,38 @@ def notion_create_page(properties: Dict[str, Any]) -> None:
 
 
 # ---------------- Missevan helpers ----------------
-def maoer_fetch(work_id: int) -> Dict[str, Any]:
+def maoer_fetch(work_id: int):
     params = {"drama_id": work_id, "p": 1, "page_size": 10}
 
     headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/122.0.0.0 Safari/537.36"
-        ),
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         "Referer": f"https://www.missevan.com/mdrama/{work_id}",
         "Origin": "https://www.missevan.com",
         "Connection": "keep-alive",
     }
+
     if MISSEVAN_COOKIE:
         headers["Cookie"] = MISSEVAN_COOKIE
 
     r = requests.get(MAOER_EPISODE_DETAILS, params=params, headers=headers, timeout=30)
+
     print("MAOER status:", r.status_code)
-print("MAOER content-type:", r.headers.get("content-type"))
-print("MAOER head:", r.text[:200])
+    print("MAOER content-type:", r.headers.get("content-type"))
+    print("MAOER head:", r.text[:200])
 
-try:
-    j = r.json()
-    print("MAOER json keys:", list(j.keys())[:20])
-    print("MAOER code/msg:", j.get("code"), j.get("msg"))
-except Exception as e:
-    print("MAOER json parse failed:", e)
-    raise
+    try:
+        j = r.json()
+        print("MAOER json keys:", list(j.keys())[:20])
+        print("MAOER code/msg:", j.get("code"), j.get("msg"))
+    except Exception as e:
+        print("MAOER json parse failed:", e)
+        raise
 
-    if r.status_code != 200:
-        print("MISSEVAN HTTP", r.status_code)
-        print("Response head:", r.text[:300])
-        r.raise_for_status()
-
-    j = r.json()
-    info = j.get("info", {})
-    drama = info.get("drama", {})
+    # 先按你原来的解析写着（下一步我们会根据日志调整层级）
+    info = j.get("info", {}) or {}
+    drama = info.get("drama", {}) or {}
 
     title = drama.get("name")
     cover_url = drama.get("cover")
@@ -133,7 +126,7 @@ except Exception as e:
     newest_title = drama.get("newest")
     newest_episode_id = info.get("newest_episode_id")
 
-    episodes_block = info.get("episodes", {})
+    episodes_block = info.get("episodes", {}) or {}
     episode_list = episodes_block.get("episode", []) if isinstance(episodes_block, dict) else []
     latest_count = len(episode_list) if episode_list else None
 
