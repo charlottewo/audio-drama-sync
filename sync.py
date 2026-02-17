@@ -1,11 +1,14 @@
 import os
 import requests
 from datetime import datetime, timezone
+from typing import Dict, Any, List, Optional
 
+# --- ENV ---
 NOTION_TOKEN = os.environ["NOTION_TOKEN"]
 NOTION_DB_ID = os.environ["NOTION_DB_ID"]
-MISSEVAN_COOKIE = os.environ.get("MISSEVAN_COOKIE", "")
+MISSEVAN_COOKIE = os.environ.get("MISSEVAN_COOKIE", "").strip()
 
+# --- CONST ---
 MAOER_EPISODE_DETAILS = "https://www.missevan.com/dramaapi/getdramaepisodedetails"
 
 WORKS = [
@@ -17,7 +20,8 @@ WORKS = [
 ]
 
 
-def notion_headers():
+# ---------------- Notion helpers ----------------
+def notion_headers() -> Dict[str, str]:
     return {
         "Authorization": f"Bearer {NOTION_TOKEN}",
         "Notion-Version": "2022-06-28",
@@ -25,7 +29,27 @@ def notion_headers():
     }
 
 
-def notion_query_by_key(key: str):
+def notion_healthcheck() -> None:
+    url = "https://api.notion.com/v1/users/me"
+    r = requests.get(url, headers=notion_headers(), timeout=30)
+    print("NOTION /users/me:", r.status_code)
+    if r.status_code != 200:
+        print(r.text[:800])
+        r.raise_for_status()
+
+
+def notion_db_schema() -> Dict[str, Any]:
+    url = f"https://api.notion.com/v1/databases/{NOTION_DB_ID}"
+    r = requests.get(url, headers=notion_headers(), timeout=30)
+    print("NOTION /databases/{id}:", r.status_code)
+    if r.status_code != 200:
+        print(r.text[:800])
+        r.raise_for_status()
+    return r.json()
+
+
+def notion_query_by_key(key: str) -> List[Dict[str, Any]]:
+    # Key 是 formula：format(prop("Platform")) + ":" + prop("Work ID")
     url = f"https://api.notion.com/v1/databases/{NOTION_DB_ID}/query"
     body = {
         "filter": {
@@ -34,11 +58,14 @@ def notion_query_by_key(key: str):
         }
     }
     r = requests.post(url, headers=notion_headers(), json=body, timeout=30)
+    if r.status_code != 200:
+        print("NOTION query failed:", r.status_code)
+        print(r.text[:800])
     r.raise_for_status()
     return r.json().get("results", [])
 
 
-def notion_update_page(page_id: str, properties: dict):
+def notion_update_page(page_id: str, properties: Dict[str, Any]) -> None:
     url = f"https://api.notion.com/v1/pages/{page_id}"
     body = {"properties": properties}
     r = requests.patch(url, headers=notion_headers(), json=body, timeout=30)
@@ -48,32 +75,38 @@ def notion_update_page(page_id: str, properties: dict):
     r.raise_for_status()
 
 
-def notion_create_page(properties: dict):
+def notion_create_page(properties: Dict[str, Any]) -> None:
     url = "https://api.notion.com/v1/pages"
     body = {"parent": {"database_id": NOTION_DB_ID}, "properties": properties}
     r = requests.post(url, headers=notion_headers(), json=body, timeout=30)
+    if r.status_code != 200:
+        print("NOTION create failed:", r.status_code)
+        print(r.text[:800])
     r.raise_for_status()
 
 
-def maoer_fetch(work_id: int):
+# ---------------- Missevan helpers ----------------
+def maoer_fetch(work_id: int) -> Dict[str, Any]:
     params = {"drama_id": work_id, "p": 1, "page_size": 10}
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/122.0.0.0 Safari/537.36"
+        ),
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         "Referer": f"https://www.missevan.com/mdrama/{work_id}",
         "Origin": "https://www.missevan.com",
         "Connection": "keep-alive",
     }
-
     if MISSEVAN_COOKIE:
         headers["Cookie"] = MISSEVAN_COOKIE
 
     r = requests.get(MAOER_EPISODE_DETAILS, params=params, headers=headers, timeout=30)
-
     if r.status_code != 200:
-        print("HTTP", r.status_code)
+        print("MISSEVAN HTTP", r.status_code)
         print("Response head:", r.text[:300])
         r.raise_for_status()
 
@@ -106,50 +139,63 @@ def maoer_fetch(work_id: int):
     }
 
 
-def notion_properties_for_work(work: dict, data: dict):
-    props = {
-        "Title": {"title": [{"text": {"content": data["title"] or f"猫耳-{work['work_id']}"}}]},
-        "Platform": {"select": {"name": work["platform"]}},
-        "Work ID": {"rich_text": [{"text": {"content": str(work["work_id"])}}]},
-        "Work URL": {"url": work.get("work_url")},
-        "Cover URL": {"url": data.get("cover_url")},
-        "Price": {"number": data.get("price")},
-        "Is Serial": {"checkbox": bool(data.get("is_serial"))},
-        "Latest Episode": {"rich_text": [{"text": {"content": data.get("newest_title") or ""}}]},
-        "Latest Episode No": {"number": data.get("latest_count")},
-        "Last Sync": {"date": {"start": data.get("last_sync")}},
-    }
-    return props
+# ---------------- Property builder ----------------
+def build_properties(work: Dict[str, Any], data: Dict[str, Any], db_props: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    只写数据库里确实存在的属性，避免你手搓字段少了就 400。
+    Key 是 formula，不写入。
+    """
+    want: Dict[str, Any] = {}
 
-def notion_healthcheck():
-    url = "https://api.notion.com/v1/users/me"
-    r = requests.get(url, headers=notion_headers(), timeout=30)
-    print("NOTION /users/me:", r.status_code)
-    if r.status_code != 200:
-        print(r.text[:300])
-        r.raise_for_status()
+    # Title (Notion 的标题属性名必须跟你库里一致：你这里就叫 Title)
+    if "Title" in db_props:
+        want["Title"] = {"title": [{"text": {"content": data["title"] or f"猫耳-{work['work_id']}"}}]}
 
-def notion_db_check():
-    url = f"https://api.notion.com/v1/databases/{NOTION_DB_ID}"
-    r = requests.get(url, headers=notion_headers(), timeout=30)
-    print("NOTION /databases/{id}:", r.status_code)
-    if r.status_code != 200:
-        print(r.text[:300])
-        r.raise_for_status()
+    if "Platform" in db_props:
+        want["Platform"] = {"select": {"name": work["platform"]}}
 
-def main():
+    if "Work ID" in db_props:
+        want["Work ID"] = {"rich_text": [{"text": {"content": str(work["work_id"])}}]}
+
+    if "Work URL" in db_props:
+        want["Work URL"] = {"url": work.get("work_url")}
+
+    if "Cover URL" in db_props:
+        want["Cover URL"] = {"url": data.get("cover_url")}
+
+    if "Price" in db_props:
+        want["Price"] = {"number": data.get("price")}
+
+    if "Is Serial" in db_props:
+        want["Is Serial"] = {"checkbox": bool(data.get("is_serial"))}
+
+    if "Latest Episode" in db_props:
+        want["Latest Episode"] = {"rich_text": [{"text": {"content": data.get("newest_title") or ""}}]}
+
+    if "Latest Episode No" in db_props:
+        want["Latest Episode No"] = {"number": data.get("latest_count")}
+
+    # 你库里现在没有这个字段就不写；你想要的话自己在 Notion 里加一个 Date 字段叫 Last Sync
+    if "Last Sync" in db_props:
+        want["Last Sync"] = {"date": {"start": data.get("last_sync")}}
+
+    return want
+
+
+def main() -> None:
     notion_healthcheck()
-    notion_db_check()
+    schema = notion_db_schema()
+    db_props = schema.get("properties", {})
+
     for w in WORKS:
-        if w["platform"] != "猫耳":
+        if w.get("platform") != "猫耳":
             continue
 
+        key = f"{w['platform']}:{w['work_id']}"  # 用于查 Key formula
         data = maoer_fetch(w["work_id"])
-        key = f"{w['platform']}:{w['work_id']}"
+        props = build_properties(w, data, db_props)
 
-        props = notion_properties_for_work(w, data)
         existing = notion_query_by_key(key)
-
         if existing:
             page_id = existing[0]["id"]
             notion_update_page(page_id, props)
