@@ -11,7 +11,7 @@ MISSEVAN_COOKIE = os.environ.get("MISSEVAN_COOKIE", "").strip()
 MAOER_GET_DRAMA = "https://www.missevan.com/dramaapi/getdrama"
 MAOER_EPISODE_DETAILS = "https://www.missevan.com/dramaapi/getdramaepisodedetails"
 
-# 你的 Notion 字段名（必须完全一致）
+# ====== Notion 字段名 ======
 PROP_TITLE = "Title"
 PROP_PLATFORM = "Platform"
 PROP_WORK_URL = "Work URL"
@@ -20,9 +20,11 @@ PROP_IS_SERIAL = "Is Serial"
 PROP_LATEST_EP = "Latest Episode"
 PROP_LATEST_NO = "Latest Episode No"
 PROP_LAST_SYNC = "Last Sync"
-PROP_KEY = "Key"  # 你的是 formula：Platform + ":" + Work ID
+PROP_PRICE = "Price"
+PROP_MAIN_CV = "Main CV"   # ⚠️ 如果不是这个名字，改成你的
 
 
+# -------------------------
 def notion_headers():
     return {
         "Authorization": f"Bearer {NOTION_TOKEN}",
@@ -31,32 +33,10 @@ def notion_headers():
     }
 
 
-def extract_text_title(page: dict) -> str:
-    t = page.get("properties", {}).get(PROP_TITLE, {}).get("title", [])
-    if t and isinstance(t, list):
-        return "".join([x.get("plain_text", "") for x in t])
-    return ""
-
-
-def get_prop_url(page: dict, prop_name: str) -> str:
-    return page.get("properties", {}).get(prop_name, {}).get("url") or ""
-
-
-def get_prop_select(page: dict, prop_name: str) -> str:
-    s = page.get("properties", {}).get(prop_name, {}).get("select")
-    return (s or {}).get("name") if isinstance(s, dict) else ""
-
-
 def extract_drama_id(work_url: str) -> Optional[int]:
     if not work_url:
         return None
     m = re.search(r"/mdrama/(\d+)", work_url)
-    if m:
-        return int(m.group(1))
-    m = re.search(r"[?&]drama_id=(\d+)", work_url)
-    if m:
-        return int(m.group(1))
-    m = re.search(r"(\d{3,})", work_url)
     if m:
         return int(m.group(1))
     return None
@@ -64,39 +44,73 @@ def extract_drama_id(work_url: str) -> Optional[int]:
 
 def maoer_headers(referer_url: str):
     h = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0",
         "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         "Referer": referer_url,
         "Origin": "https://www.missevan.com",
-        "Connection": "keep-alive",
     }
     if MISSEVAN_COOKIE:
         h["Cookie"] = MISSEVAN_COOKIE
     return h
 
 
+def extract_main_cv(drama: dict) -> str:
+    """
+    抓前 4 位 CV
+    优先 dramalist > author / staff
+    """
+    cvs = []
+
+    dramalist = drama.get("dramatis_personae") or drama.get("dramalist")
+    if isinstance(dramalist, list):
+        for item in dramalist:
+            name = item.get("name")
+            if name:
+                cvs.append(name)
+
+    # 兜底：staff 里找 role 含 CV 的
+    if not cvs:
+        staff = drama.get("staff")
+        if isinstance(staff, list):
+            for s in staff:
+                if "cv" in str(s.get("role", "")).lower():
+                    name = s.get("name")
+                    if name:
+                        cvs.append(name)
+
+    # 只保留前 4
+    return " / ".join(cvs[:4])
+
+
 def maoer_fetch_by_url(work_url: str) -> Dict[str, Any]:
     drama_id = extract_drama_id(work_url)
     if not drama_id:
-        raise ValueError(f"无法从 URL 提取 drama_id：{work_url}")
+        raise ValueError("无法解析 drama_id")
 
     referer = f"https://www.missevan.com/mdrama/{drama_id}"
     headers = maoer_headers(referer)
 
-    # ① getdrama：标题/封面/连载/最新一集标题
-    r1 = requests.get(MAOER_GET_DRAMA, params={"drama_id": drama_id}, headers=headers, timeout=30)
+    # 基本信息
+    r1 = requests.get(
+        MAOER_GET_DRAMA,
+        params={"drama_id": drama_id},
+        headers=headers,
+        timeout=30
+    )
     r1.raise_for_status()
     j1 = r1.json()
     info1 = j1.get("info", {})
-    drama = info1.get("drama", {}) if isinstance(info1, dict) else {}
+    drama = info1.get("drama", {})
 
     title = drama.get("name")
     cover_url = drama.get("cover")
     is_serial = bool(drama.get("serialize"))
     newest_title = drama.get("newest")
+    price = drama.get("price")
 
-    # ② episodedetails：拿总集数（优先 pagination.count）
+    main_cv = extract_main_cv(drama)
+
+    # 集数统计
     total_count = None
     r2 = requests.get(
         MAOER_EPISODE_DETAILS,
@@ -112,12 +126,9 @@ def maoer_fetch_by_url(work_url: str) -> Dict[str, Any]:
         pag = info2.get("pagination")
         if isinstance(pag, dict) and isinstance(pag.get("count"), int):
             total_count = pag["count"]
-        if total_count is None:
-            eps = info2.get("episodes")
-            if isinstance(eps, dict) and isinstance(eps.get("episode"), list):
-                total_count = len(eps["episode"])
 
     now_iso = datetime.now(timezone.utc).isoformat()
+
     return {
         "platform": "猫耳",
         "work_id": drama_id,
@@ -127,47 +138,39 @@ def maoer_fetch_by_url(work_url: str) -> Dict[str, Any]:
         "is_serial": is_serial,
         "newest_title": newest_title,
         "latest_count": total_count,
+        "price": price,
+        "main_cv": main_cv,
         "last_sync": now_iso,
     }
 
 
-def notion_db_query_all() -> List[dict]:
+def notion_db_query_all():
     url = f"https://api.notion.com/v1/databases/{NOTION_DB_ID}/query"
-    results = []
-    payload = {}
-    while True:
-        r = requests.post(url, headers=notion_headers(), json=payload, timeout=30)
-        r.raise_for_status()
-        j = r.json()
-        results.extend(j.get("results", []))
-        if j.get("has_more"):
-            payload["start_cursor"] = j.get("next_cursor")
-        else:
-            break
-    return results
+    r = requests.post(url, headers=notion_headers(), json={}, timeout=30)
+    r.raise_for_status()
+    return r.json().get("results", [])
 
 
 def notion_update_page(page_id: str, properties: dict):
     url = f"https://api.notion.com/v1/pages/{page_id}"
-    body = {"properties": properties}
-    r = requests.patch(url, headers=notion_headers(), json=body, timeout=30)
+    r = requests.patch(url, headers=notion_headers(), json={"properties": properties}, timeout=30)
     if r.status_code != 200:
-        print("NOTION update failed:", r.status_code)
-        print(r.text[:1200])
+        print("NOTION update failed:", r.text)
     r.raise_for_status()
 
 
 def notion_props_from_data(data: dict) -> dict:
-    # 你 Key 是 formula，所以这里不写 Key（让它自己算）
     return {
         PROP_TITLE: {"title": [{"text": {"content": data["title"] or f"猫耳-{data['work_id']}"}}]},
-        PROP_PLATFORM: {"select": {"name": data["platform"]}},  # 默认猫耳
+        PROP_PLATFORM: {"select": {"name": data["platform"]}},
         PROP_WORK_ID: {"rich_text": [{"text": {"content": str(data["work_id"])}}]},
         PROP_WORK_URL: {"url": data.get("work_url")},
-        "Cover URL": {"url": data.get("cover_url")},  # 你数据库里有这个字段
+        "Cover URL": {"url": data.get("cover_url")},
         PROP_IS_SERIAL: {"checkbox": bool(data.get("is_serial"))},
         PROP_LATEST_EP: {"rich_text": [{"text": {"content": data.get("newest_title") or ""}}]},
-        PROP_LATEST_NO: {"number": data.get("latest_count") if isinstance(data.get("latest_count"), int) else None},
+        PROP_LATEST_NO: {"number": data.get("latest_count")},
+        PROP_PRICE: {"number": data.get("price") if isinstance(data.get("price"), (int, float)) else None},
+        PROP_MAIN_CV: {"rich_text": [{"text": {"content": data.get("main_cv") or ""}}]},
         PROP_LAST_SYNC: {"date": {"start": data.get("last_sync")}},
     }
 
@@ -178,22 +181,18 @@ def main():
 
     for p in pages:
         page_id = p["id"]
-        work_url = get_prop_url(p, PROP_WORK_URL).strip()
-        if not work_url:
-            continue
+        work_url = p["properties"].get(PROP_WORK_URL, {}).get("url")
 
-        # 平台默认猫耳；如果你将来加别的平台，可以从 Notion select 读出来
-        platform = get_prop_select(p, PROP_PLATFORM).strip() or "猫耳"
-        if platform != "猫耳":
+        if not work_url:
             continue
 
         try:
             data = maoer_fetch_by_url(work_url)
             props = notion_props_from_data(data)
             notion_update_page(page_id, props)
-            print("updated", data["work_id"], data.get("title"), data.get("newest_title"))
+            print("updated", data["work_id"], data.get("title"))
         except Exception as e:
-            print("FAILED:", work_url, "=>", repr(e))
+            print("FAILED:", work_url, "=>", e)
 
 
 if __name__ == "__main__":
