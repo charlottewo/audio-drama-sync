@@ -121,11 +121,12 @@ def notion_properties_for_work(work: dict, data: dict):
     return props
 
 def notion_healthcheck():
-    r = requests.get("https://api.notion.com/v1/users/me", headers=notion_headers(), timeout=30)
+    url = "https://api.notion.com/v1/users/me"
+    r = requests.get(url, headers=notion_headers(), timeout=30)
     print("NOTION /users/me:", r.status_code)
     if r.status_code != 200:
         print(r.text[:300])
-    r.raise_for_status()
+        r.raise_for_status()
 
 def notion_db_check():
     url = f"https://api.notion.com/v1/databases/{NOTION_DB_ID}"
@@ -133,12 +134,11 @@ def notion_db_check():
     print("NOTION /databases/{id}:", r.status_code)
     if r.status_code != 200:
         print(r.text[:300])
-    r.raise_for_status()
+        r.raise_for_status()
 
 def main():
     notion_healthcheck()
     notion_db_check()
-    
     for w in WORKS:
         if w["platform"] != "猫耳":
             continue
