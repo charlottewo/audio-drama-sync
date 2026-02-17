@@ -23,4 +23,6 @@ jobs:
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_DB_ID: ${{ secrets.NOTION_DB_ID }}
+          MISSEVAN_COOKIE: ${{ secrets.MISSEVAN_COOKIE }}
         run: python sync.py
+
