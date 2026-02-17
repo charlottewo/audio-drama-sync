@@ -45,11 +45,25 @@ def notion_create_page(properties: dict):
     body = {"parent": {"database_id": NOTION_DB_ID}, "properties": properties}
     r = requests.post(url, headers=notion_headers(), json=body, timeout=30)
     r.raise_for_status()
-
 def maoer_fetch(work_id: int):
     params = {"drama_id": work_id, "p": 1, "page_size": 10}
-    r = requests.get(MAOER_EPISODE_DETAILS, params=params, timeout=30)
-    r.raise_for_status()
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Referer": f"https://www.missevan.com/mdrama/{work_id}",
+        "Origin": "https://www.missevan.com",
+        "Connection": "keep-alive",
+    }
+
+    r = requests.get(MAOER_EPISODE_DETAILS, params=params, headers=headers, timeout=30)
+
+    if r.status_code != 200:
+        print("HTTP", r.status_code)
+        print("Response head:", r.text[:300])
+        r.raise_for_status()
+
     j = r.json()
     info = j.get("info", {})
     drama = info.get("drama", {})
@@ -77,6 +91,20 @@ def maoer_fetch(work_id: int):
         "latest_count": latest_count,
         "last_sync": now_iso,
     }
+    
+Traceback (most recent call last):
+  File "/home/runner/work/audio-drama-sync/audio-drama-sync/sync.py", line 116, in <module>
+    main()
+  File "/home/runner/work/audio-drama-sync/audio-drama-sync/sync.py", line 101, in main
+    data = maoer_fetch(w["work_id"])
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/work/audio-drama-sync/audio-drama-sync/sync.py", line 52, in maoer_fetch
+    r.raise_for_status()
+  File "/opt/hostedtoolcache/Python/3.11.14/x64/lib/python3.11/site-packages/requests/models.py", line 1026, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 412 Client Error: Precondition Failed for url: https://www.missevan.com/dramaapi/getdramaepisodedetails?drama_id=91093&p=1&page_size=10
+Error: Process completed with exit code 1.
+##[debug]Finishing: Run sync
 
 def notion_properties_for_work(work: dict, data: dict):
     props = {
