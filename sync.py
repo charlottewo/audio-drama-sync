@@ -1,14 +1,13 @@
 import os
 import requests
 from datetime import datetime, timezone
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 
-# --- ENV ---
 NOTION_TOKEN = os.environ["NOTION_TOKEN"]
 NOTION_DB_ID = os.environ["NOTION_DB_ID"]
 MISSEVAN_COOKIE = os.environ.get("MISSEVAN_COOKIE", "").strip()
 
-# --- CONST ---
+MAOER_DRAMA = "https://www.missevan.com/dramaapi/getdrama"
 MAOER_EPISODE_DETAILS = "https://www.missevan.com/dramaapi/getdramaepisodedetails"
 
 WORKS = [
@@ -20,7 +19,7 @@ WORKS = [
 ]
 
 
-# ---------------- Notion helpers ----------------
+# ---------------- Notion ----------------
 def notion_headers() -> Dict[str, str]:
     return {
         "Authorization": f"Bearer {NOTION_TOKEN}",
@@ -30,8 +29,7 @@ def notion_headers() -> Dict[str, str]:
 
 
 def notion_healthcheck() -> None:
-    url = "https://api.notion.com/v1/users/me"
-    r = requests.get(url, headers=notion_headers(), timeout=30)
+    r = requests.get("https://api.notion.com/v1/users/me", headers=notion_headers(), timeout=30)
     print("NOTION /users/me:", r.status_code)
     if r.status_code != 200:
         print(r.text[:800])
@@ -49,14 +47,8 @@ def notion_db_schema() -> Dict[str, Any]:
 
 
 def notion_query_by_key(key: str) -> List[Dict[str, Any]]:
-    # Key 是 formula：format(prop("Platform")) + ":" + prop("Work ID")
     url = f"https://api.notion.com/v1/databases/{NOTION_DB_ID}/query"
-    body = {
-        "filter": {
-            "property": "Key",
-            "formula": {"string": {"equals": key}},
-        }
-    }
+    body = {"filter": {"property": "Key", "formula": {"string": {"equals": key}}}}
     r = requests.post(url, headers=notion_headers(), json=body, timeout=30)
     if r.status_code != 200:
         print("NOTION query failed:", r.status_code)
@@ -67,8 +59,7 @@ def notion_query_by_key(key: str) -> List[Dict[str, Any]]:
 
 def notion_update_page(page_id: str, properties: Dict[str, Any]) -> None:
     url = f"https://api.notion.com/v1/pages/{page_id}"
-    body = {"properties": properties}
-    r = requests.patch(url, headers=notion_headers(), json=body, timeout=30)
+    r = requests.patch(url, headers=notion_headers(), json={"properties": properties}, timeout=30)
     if r.status_code != 200:
         print("NOTION update failed:", r.status_code)
         print(r.text[:800])
@@ -85,76 +76,11 @@ def notion_create_page(properties: Dict[str, Any]) -> None:
     r.raise_for_status()
 
 
-# ---------------- Missevan helpers ----------------
-def maoer_fetch(work_id: int):
-    params = {"drama_id": work_id, "p": 1, "page_size": 10}
-
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-        "Referer": f"https://www.missevan.com/mdrama/{work_id}",
-        "Origin": "https://www.missevan.com",
-        "Connection": "keep-alive",
-    }
-
-    if MISSEVAN_COOKIE:
-        headers["Cookie"] = MISSEVAN_COOKIE
-
-    r = requests.get(MAOER_EPISODE_DETAILS, params=params, headers=headers, timeout=30)
-
-    print("MAOER status:", r.status_code)
-    print("MAOER content-type:", r.headers.get("content-type"))
-    print("MAOER head:", r.text[:200])
-
-    try:
-        j = r.json()
-        print("MAOER json keys:", list(j.keys())[:20])
-        print("MAOER code/msg:", j.get("code"), j.get("msg"))
-    except Exception as e:
-        print("MAOER json parse failed:", e)
-        raise
-
-    # 先按你原来的解析写着（下一步我们会根据日志调整层级）
-    info = j.get("info", {}) or {}
-    drama = info.get("drama", {}) or {}
-
-    title = drama.get("name")
-    cover_url = drama.get("cover")
-    price = drama.get("price")
-    is_serial = bool(drama.get("serialize"))
-    newest_title = drama.get("newest")
-    newest_episode_id = info.get("newest_episode_id")
-
-    episodes_block = info.get("episodes", {}) or {}
-    episode_list = episodes_block.get("episode", []) if isinstance(episodes_block, dict) else []
-    latest_count = len(episode_list) if episode_list else None
-
-    now_iso = datetime.now(timezone.utc).isoformat()
-
-    return {
-        "title": title,
-        "cover_url": cover_url,
-        "price": price,
-        "is_serial": is_serial,
-        "newest_title": newest_title,
-        "newest_episode_id": newest_episode_id,
-        "latest_count": latest_count,
-        "last_sync": now_iso,
-    }
-
-
-# ---------------- Property builder ----------------
 def build_properties(work: Dict[str, Any], data: Dict[str, Any], db_props: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    只写数据库里确实存在的属性，避免你手搓字段少了就 400。
-    Key 是 formula，不写入。
-    """
     want: Dict[str, Any] = {}
 
-    # Title (Notion 的标题属性名必须跟你库里一致：你这里就叫 Title)
     if "Title" in db_props:
-        want["Title"] = {"title": [{"text": {"content": data["title"] or f"猫耳-{work['work_id']}"}}]}
+        want["Title"] = {"title": [{"text": {"content": data.get("title") or f"猫耳-{work['work_id']}"}}]}
 
     if "Platform" in db_props:
         want["Platform"] = {"select": {"name": work["platform"]}}
@@ -178,13 +104,111 @@ def build_properties(work: Dict[str, Any], data: Dict[str, Any], db_props: Dict[
         want["Latest Episode"] = {"rich_text": [{"text": {"content": data.get("newest_title") or ""}}]}
 
     if "Latest Episode No" in db_props:
-        want["Latest Episode No"] = {"number": data.get("latest_count")}
+        want["Latest Episode No"] = {"number": data.get("total_count")}
 
-    # 你库里现在没有这个字段就不写；你想要的话自己在 Notion 里加一个 Date 字段叫 Last Sync
-    if "Last Sync" in db_props:
-        want["Last Sync"] = {"date": {"start": data.get("last_sync")}}
+    if "Last Sync" in db_props and data.get("last_sync"):
+        want["Last Sync"] = {"date": {"start": data["last_sync"]}}
 
     return want
+
+
+# ---------------- Missevan ----------------
+def maoer_headers(work_id: int) -> Dict[str, str]:
+    h = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/122.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Referer": f"https://www.missevan.com/mdrama/{work_id}",
+        "Origin": "https://www.missevan.com",
+        "Connection": "keep-alive",
+    }
+    if MISSEVAN_COOKIE:
+        h["Cookie"] = MISSEVAN_COOKIE
+    return h
+
+
+def fetch_drama_info(work_id: int) -> Dict[str, Any]:
+    r = requests.get(MAOER_DRAMA, params={"drama_id": work_id}, headers=maoer_headers(work_id), timeout=30)
+    if r.status_code != 200:
+        print("MAOER getdrama HTTP", r.status_code, r.text[:300])
+        r.raise_for_status()
+    j = r.json()
+    info = j.get("info", {}) or {}
+    drama = info.get("drama", {}) or {}
+    return {
+        "title": drama.get("name"),
+        "cover_url": drama.get("cover"),
+        "price": drama.get("price"),
+        "is_serial": bool(drama.get("serialize")),
+        "newest_title": drama.get("newest"),
+        "newest_episode_id": info.get("newest_episode_id"),
+    }
+
+
+def fetch_episode_list_info(work_id: int) -> Dict[str, Any]:
+    # 这个接口有两种返回：info.episodes 或 info.Datas + pagination
+    r = requests.get(
+        MAOER_EPISODE_DETAILS,
+        params={"drama_id": work_id, "p": 1, "page_size": 10},
+        headers=maoer_headers(work_id),
+        timeout=30,
+    )
+    if r.status_code != 200:
+        print("MAOER getdramaepisodedetails HTTP", r.status_code, r.text[:300])
+        r.raise_for_status()
+
+    j = r.json()
+    info = j.get("info", {}) or {}
+
+    # 结构 1：你最早贴的那种（episodes）
+    episodes_block = info.get("episodes")
+    if isinstance(episodes_block, dict) and "episode" in episodes_block:
+        ep_list = episodes_block.get("episode") or []
+        # 这个列表不一定代表总数，所以尽量找 count 字段（如果有）
+        total = None
+        if isinstance(info.get("episodes"), dict):
+            # 没有总数字段就先用最新页大小兜底（你要总数的话得翻页或找其他字段）
+            total = len(ep_list) if isinstance(ep_list, list) else None
+        newest_from_list = ep_list[-1].get("name") if isinstance(ep_list, list) and ep_list else None
+        return {"newest_from_list": newest_from_list, "total_count": total}
+
+    # 结构 2：你现在跑出来的（Datas + pagination）
+    datas = info.get("Datas")
+    pagination = info.get("pagination") or {}
+    if isinstance(datas, list):
+        newest_from_list = datas[0].get("soundstr") if datas else None
+        total = pagination.get("count")  # 这里是总条数（你这次日志里 pagination 还没打，但结构就这样）
+        return {"newest_from_list": newest_from_list, "total_count": total}
+
+    return {"newest_from_list": None, "total_count": None}
+
+
+def maoer_fetch(work_id: int) -> Dict[str, Any]:
+    # 先拿剧集信息（title/cover/price/newest）
+    drama = fetch_drama_info(work_id)
+
+    # 再拿列表信息（总数/列表最新，作为兜底）
+    epi = fetch_episode_list_info(work_id)
+
+    # newest_title 优先用 getdrama 的 drama.newest；没有则用列表推断
+    newest_title = drama.get("newest_title") or epi.get("newest_from_list")
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    return {
+        "title": drama.get("title"),
+        "cover_url": drama.get("cover_url"),
+        "price": drama.get("price"),
+        "is_serial": bool(drama.get("is_serial")),
+        "newest_title": newest_title,
+        "newest_episode_id": drama.get("newest_episode_id"),
+        "total_count": epi.get("total_count"),
+        "last_sync": now_iso,
+    }
 
 
 def main() -> None:
@@ -196,11 +220,12 @@ def main() -> None:
         if w.get("platform") != "猫耳":
             continue
 
-        key = f"{w['platform']}:{w['work_id']}"  # 用于查 Key formula
+        key = f"{w['platform']}:{w['work_id']}"
         data = maoer_fetch(w["work_id"])
-        props = build_properties(w, data, db_props)
 
+        props = build_properties(w, data, db_props)
         existing = notion_query_by_key(key)
+
         if existing:
             page_id = existing[0]["id"]
             notion_update_page(page_id, props)
