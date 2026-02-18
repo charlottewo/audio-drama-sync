@@ -1,18 +1,30 @@
 import os
 import re
+import time
+import random
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 # ====== ENV ======
 NOTION_TOKEN = os.environ["NOTION_TOKEN"]
 NOTION_DB_ID = os.environ["NOTION_DB_ID"]
-MISSEVAN_COOKIE = os.environ.get("MISSEVAN_COOKIE", "")
+MISSEVAN_COOKIE = os.environ.get("MISSEVAN_COOKIE", "").strip()
 
 # ====== Maoer / MissEvan APIs ======
 GET_DRAMA = "https://www.missevan.com/dramaapi/getdrama"
 GET_EPISODE_DETAILS = "https://www.missevan.com/dramaapi/getdramaepisodedetails"
 
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+
+# ====== Update strategy ======
+UPDATE_DAYS_SERIAL = 7
+UPDATE_DAYS_FINISHED = 30
+
+# ====== Retry strategy ======
+MAX_RETRIES = 6
+BASE_BACKOFF = 1.0  # seconds
+JITTER = 0.3        # seconds
+
 
 # =========================
 # Notion helpers
@@ -31,6 +43,26 @@ def notion_cover_payload(cover_url: str | None):
     return {"type": "external", "external": {"url": cover_url}}
 
 
+def _now_utc():
+    return datetime.now(timezone.utc)
+
+
+def _parse_iso_dt(s: str) -> datetime | None:
+    """
+    Notion date start usually like: 2026-02-17T15:06:00.000Z
+    or 2026-02-17T23:06:00+08:00
+    """
+    if not s:
+        return None
+    try:
+        # Python 3.11 can parse ISO with offset; but Z needs replacement
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        return datetime.fromisoformat(s)
+    except Exception:
+        return None
+
+
 def notion_healthcheck():
     r = requests.get("https://api.notion.com/v1/users/me", headers=notion_headers(), timeout=30)
     print("NOTION /users/me:", r.status_code)
@@ -41,8 +73,8 @@ def notion_healthcheck():
 
 def notion_get_db_schema():
     """
-    读取数据库属性列表，避免你写了一个 Notion 里不存在的字段就 400。
-    返回：set(property_name)
+    Read database properties so we only write fields that exist (avoid 400).
+    return: dict[name] = type
     """
     r = requests.get(f"https://api.notion.com/v1/databases/{NOTION_DB_ID}", headers=notion_headers(), timeout=30)
     print("NOTION /databases/{id}:", r.status_code)
@@ -52,7 +84,8 @@ def notion_get_db_schema():
 
     j = r.json()
     props = j.get("properties", {}) if isinstance(j, dict) else {}
-    return set(props.keys())
+    # props[name] is a dict like {"type": "...", ...}
+    return {k: (v.get("type") if isinstance(v, dict) else None) for k, v in props.items()}
 
 
 def _get_prop_text(prop: dict) -> str:
@@ -78,26 +111,35 @@ def _get_prop_text(prop: dict) -> str:
             return str(int(fv)) if fv.is_integer() else str(fv)
         except Exception:
             return str(v)
+    if t == "date":
+        d = prop.get("date") or {}
+        return d.get("start") or ""
+    if t == "checkbox":
+        return "true" if prop.get("checkbox") else "false"
 
     return ""
 
 
+def _get_prop_date_start(prop: dict) -> str:
+    if not prop:
+        return ""
+    if prop.get("type") != "date":
+        return ""
+    d = prop.get("date") or {}
+    return d.get("start") or ""
+
+
 def notion_query_rows_target():
     """
-    核心：不再要求 Platform=猫耳。
-    只要 Work URL 里包含 missevan.com/mdrama（或 md rama/drama/xxxx）就扫出来。
-    另外：如果你只填了 Work ID（rich_text 不为空）也扫出来。
+    Target rows:
+    - Work URL contains missevan.com/mdrama
+    (Work ID can exist or not; URL is the main key.)
     """
     url = f"https://api.notion.com/v1/databases/{NOTION_DB_ID}/query"
 
     body = {
         "page_size": 100,
-        "filter": {
-            "or": [
-                {"property": "Work URL", "url": {"contains": "missevan.com/mdrama"}},
-                {"property": "Work ID", "rich_text": {"is_not_empty": True}},
-            ]
-        },
+        "filter": {"property": "Work URL", "url": {"contains": "missevan.com/mdrama"}},
     }
 
     rows = []
@@ -118,7 +160,17 @@ def notion_query_rows_target():
             work_url = _get_prop_text(props.get("Work URL")).strip()
             work_id_text = _get_prop_text(props.get("Work ID")).strip()
             platform = _get_prop_text(props.get("Platform")).strip()
+
+            # For manual override of CV (optional)
             main_cv_override = _get_prop_text(props.get("Main CV Override")).strip()
+
+            # Last Sync (date) - may be blank
+            last_sync_start = _get_prop_date_start(props.get("Last Sync"))
+
+            # Is Serial (checkbox)
+            is_serial_str = _get_prop_text(props.get("Is Serial")).strip().lower()
+            # default unknown -> treat as serial (update more frequently)
+            is_serial = True if is_serial_str == "" else (is_serial_str == "true")
 
             rows.append(
                 {
@@ -127,6 +179,8 @@ def notion_query_rows_target():
                     "work_id_text": work_id_text,
                     "platform": platform,
                     "main_cv_override": main_cv_override,
+                    "last_sync_start": last_sync_start,
+                    "is_serial_current": is_serial,
                 }
             )
 
@@ -137,6 +191,48 @@ def notion_query_rows_target():
     return rows
 
 
+def _request_with_retry(method: str, url: str, *, headers=None, json=None, params=None, timeout=30):
+    """
+    Retry for:
+    - 502/503/504
+    - 429 (respect Retry-After)
+    Network errors also retry.
+    """
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            r = requests.request(method, url, headers=headers, json=json, params=params, timeout=timeout)
+
+            if r.status_code == 429:
+                ra = r.headers.get("Retry-After")
+                wait = None
+                if ra:
+                    try:
+                        wait = float(ra)
+                    except Exception:
+                        wait = None
+                if wait is None:
+                    wait = BASE_BACKOFF * (2 ** (attempt - 1))
+                wait += random.random() * JITTER
+                print(f"[retry] {method} {url} -> 429, sleep {wait:.2f}s (attempt {attempt}/{MAX_RETRIES})")
+                time.sleep(wait)
+                continue
+
+            if r.status_code in (502, 503, 504):
+                wait = BASE_BACKOFF * (2 ** (attempt - 1)) + random.random() * JITTER
+                print(f"[retry] {method} {url} -> {r.status_code}, sleep {wait:.2f}s (attempt {attempt}/{MAX_RETRIES})")
+                time.sleep(wait)
+                continue
+
+            return r
+
+        except requests.RequestException as e:
+            wait = BASE_BACKOFF * (2 ** (attempt - 1)) + random.random() * JITTER
+            print(f"[retry] {method} {url} -> network error: {e}. sleep {wait:.2f}s (attempt {attempt}/{MAX_RETRIES})")
+            time.sleep(wait)
+
+    raise RuntimeError(f"Request failed after retries: {method} {url}")
+
+
 def notion_update_page(page_id: str, properties: dict, cover_url: str | None = None):
     url = f"https://api.notion.com/v1/pages/{page_id}"
     body = {"properties": properties}
@@ -144,10 +240,10 @@ def notion_update_page(page_id: str, properties: dict, cover_url: str | None = N
     if cover:
         body["cover"] = cover
 
-    r = requests.patch(url, headers=notion_headers(), json=body, timeout=30)
+    r = _request_with_retry("PATCH", url, headers=notion_headers(), json=body, timeout=30)
     if r.status_code != 200:
         print("NOTION update failed:", r.status_code)
-        print(r.text[:800])
+        print(r.text[:1000])
     r.raise_for_status()
 
 
@@ -199,7 +295,7 @@ def maoer_get_episode_details(work_id: int) -> dict:
 
 
 # =========================
-# CV picking (A) + Override (B)
+# CV picking + Override
 # =========================
 BAD_WORDS_STRONG = [
     "导演", "监制", "制作", "策划", "编剧", "后期", "统筹", "录音", "配音导演",
@@ -222,7 +318,6 @@ def pick_main_cvs(cvs: list, k: int = 4) -> str:
 
         if not name:
             continue
-
         if any(w in character for w in MUSIC_WORDS_STRONG):
             continue
         if any(w in character for w in BAD_WORDS_STRONG):
@@ -297,7 +392,7 @@ def maoer_fetch(work_id: int) -> dict:
             if isinstance(datas, list) and datas:
                 latest_count = len(datas)
 
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso = _now_utc().isoformat()
 
     return {
         "title": title,
@@ -321,10 +416,30 @@ def parse_work_id(work_url: str, fallback: str):
     return None
 
 
-def build_props(schema: set, work_id: int, work_url: str, data: dict, current_platform: str):
+def should_update(is_serial_now: bool, last_sync_start: str) -> bool:
     """
-    只写 schema 里存在的字段，避免 400。
-    Platform：如果你没填，我帮你自动写“猫耳”；你填了就尊重你不乱改。
+    Strategy:
+    - Last Sync empty -> update immediately
+    - serial -> update if >= 7 days since last sync
+    - finished -> update if >= 30 days since last sync
+    """
+    if not last_sync_start:
+        return True
+
+    dt = _parse_iso_dt(last_sync_start)
+    if not dt:
+        # can't parse -> just update
+        return True
+
+    age_days = (_now_utc() - dt.astimezone(timezone.utc)).total_seconds() / 86400.0
+    threshold = UPDATE_DAYS_SERIAL if is_serial_now else UPDATE_DAYS_FINISHED
+    return age_days >= threshold
+
+
+def build_props(schema: dict, work_id: int, work_url: str, data: dict, current_platform: str):
+    """
+    Only write existing properties.
+    Platform: you said you won't input it; we auto set "猫耳" (safe).
     """
     props = {}
 
@@ -334,9 +449,8 @@ def build_props(schema: set, work_id: int, work_url: str, data: dict, current_pl
 
     put("Title", {"title": [{"text": {"content": data.get("title") or f"猫耳-{work_id}"}}]})
 
-    # Platform 自动补齐（你不填就我填）
-    if not current_platform:
-        put("Platform", {"select": {"name": "猫耳"}})
+    # Always set Platform to 猫耳 (you only have one option)
+    put("Platform", {"select": {"name": "猫耳"}})
 
     put("Work ID", {"rich_text": [{"text": {"content": str(work_id)}}]})
     put("Work URL", {"url": work_url or f"https://www.missevan.com/mdrama/{work_id}"})
@@ -364,31 +478,37 @@ def main():
     rows = notion_query_rows_target()
     print("Notion target rows:", len(rows))
 
-    for row in rows:
+    for idx, row in enumerate(rows, start=1):
         page_id = row["page_id"]
         work_url = row["work_url"]
         work_id = parse_work_id(work_url, row["work_id_text"])
 
         if not work_id:
-            print("SKIP (cannot parse Work ID). page:", page_id)
+            print(f"[{idx}/{len(rows)}] SKIP (cannot parse Work ID). page:", page_id)
             print("  Work URL:", work_url)
             print("  Work ID:", row["work_id_text"])
             print("  Tip: 直接贴猫耳剧集详情页 URL（含 /mdrama/数字）")
             continue
 
+        # Decide update based on current row's is_serial + last_sync
+        if not should_update(row.get("is_serial_current", True), row.get("last_sync_start", "")):
+            print(f"[{idx}/{len(rows)}] skip (fresh) {work_id}")
+            continue
+
         data = maoer_fetch(work_id)
 
-        # B：手动覆盖优先（你填了就用你的）
+        # Manual override CV has highest priority
         override = (row.get("main_cv_override") or "").strip()
         if override:
             data["cv_text"] = override
 
         props = build_props(schema, work_id, work_url, data, current_platform=row.get("platform", ""))
 
+        # Notion update with retry
         notion_update_page(page_id, props, cover_url=data.get("cover_url"))
 
-        print("updated", work_id, data.get("title"),
-              f"count={data.get('latest_count')}", f"serial={data.get('is_serial')}")
+        print(f"[{idx}/{len(rows)}] updated {work_id} {data.get('title')} "
+              f"count={data.get('latest_count')} serial={data.get('is_serial')}")
 
 if __name__ == "__main__":
     main()
