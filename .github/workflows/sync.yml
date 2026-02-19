@@ -2,8 +2,6 @@ name: Sync Audio Dramas
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "10 10 * * *"  # 每天 UTC 10:10（北京时间 18:10）
 
 jobs:
   sync:
