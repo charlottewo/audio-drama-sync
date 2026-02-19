@@ -3,7 +3,7 @@ import re
 import time
 import random
 import requests
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 
 # ====== ENV ======
 NOTION_TOKEN = os.environ["NOTION_TOKEN"]
@@ -17,8 +17,7 @@ GET_EPISODE_DETAILS = "https://www.missevan.com/dramaapi/getdramaepisodedetails"
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
 # ====== Update strategy ======
-UPDATE_DAYS_SERIAL = 7
-UPDATE_DAYS_FINISHED = 30
+UPDATE_DAYS_SERIAL = 7  # only serial items update if last_sync >= 7 days
 
 # ====== Retry strategy ======
 MAX_RETRIES = 6
@@ -49,13 +48,13 @@ def _now_utc():
 
 def _parse_iso_dt(s: str) -> datetime | None:
     """
-    Notion date start usually like: 2026-02-17T15:06:00.000Z
-    or 2026-02-17T23:06:00+08:00
+    Notion date start usually like:
+      2026-02-17T15:06:00.000Z
+      2026-02-17T23:06:00+08:00
     """
     if not s:
         return None
     try:
-        # Python 3.11 can parse ISO with offset; but Z needs replacement
         if s.endswith("Z"):
             s = s[:-1] + "+00:00"
         return datetime.fromisoformat(s)
@@ -84,7 +83,6 @@ def notion_get_db_schema():
 
     j = r.json()
     props = j.get("properties", {}) if isinstance(j, dict) else {}
-    # props[name] is a dict like {"type": "...", ...}
     return {k: (v.get("type") if isinstance(v, dict) else None) for k, v in props.items()}
 
 
@@ -121,22 +119,24 @@ def _get_prop_text(prop: dict) -> str:
 
 
 def _get_prop_date_start(prop: dict) -> str:
-    if not prop:
-        return ""
-    if prop.get("type") != "date":
+    if not prop or prop.get("type") != "date":
         return ""
     d = prop.get("date") or {}
     return d.get("start") or ""
+
+
+def _get_prop_checkbox(prop: dict) -> bool:
+    if not prop or prop.get("type") != "checkbox":
+        return False
+    return bool(prop.get("checkbox"))
 
 
 def notion_query_rows_target():
     """
     Target rows:
     - Work URL contains missevan.com/mdrama
-    (Work ID can exist or not; URL is the main key.)
     """
     url = f"https://api.notion.com/v1/databases/{NOTION_DB_ID}/query"
-
     body = {
         "page_size": 100,
         "filter": {"property": "Work URL", "url": {"contains": "missevan.com/mdrama"}},
@@ -161,16 +161,12 @@ def notion_query_rows_target():
             work_id_text = _get_prop_text(props.get("Work ID")).strip()
             platform = _get_prop_text(props.get("Platform")).strip()
 
-            # For manual override of CV (optional)
             main_cv_override = _get_prop_text(props.get("Main CV Override")).strip()
 
-            # Last Sync (date) - may be blank
             last_sync_start = _get_prop_date_start(props.get("Last Sync"))
 
-            # Is Serial (checkbox)
-            is_serial_str = _get_prop_text(props.get("Is Serial")).strip().lower()
-            # default unknown -> treat as serial (update more frequently)
-            is_serial = True if is_serial_str == "" else (is_serial_str == "true")
+            # IMPORTANT: use checkbox bool directly
+            is_serial = _get_prop_checkbox(props.get("Is Serial"))
 
             rows.append(
                 {
@@ -416,30 +412,32 @@ def parse_work_id(work_url: str, fallback: str):
     return None
 
 
-def should_update(is_serial_now: bool, last_sync_start: str) -> bool:
+def should_update(is_serial_checked: bool, last_sync_start: str) -> bool:
     """
-    Strategy:
+    New Strategy (your requirement):
     - Last Sync empty -> update immediately
-    - serial -> update if >= 7 days since last sync
-    - finished -> update if >= 30 days since last sync
+    - Else: ONLY update when Is Serial is checked AND last_sync >= 7 days
+    - If not serial (unchecked) -> never update (unless last sync is empty / unparseable)
     """
     if not last_sync_start:
         return True
 
     dt = _parse_iso_dt(last_sync_start)
     if not dt:
-        # can't parse -> just update
+        # can't parse -> treat as needs update to fix the bad value
         return True
 
+    if not is_serial_checked:
+        return False
+
     age_days = (_now_utc() - dt.astimezone(timezone.utc)).total_seconds() / 86400.0
-    threshold = UPDATE_DAYS_SERIAL if is_serial_now else UPDATE_DAYS_FINISHED
-    return age_days >= threshold
+    return age_days >= UPDATE_DAYS_SERIAL
 
 
-def build_props(schema: dict, work_id: int, work_url: str, data: dict, current_platform: str):
+def build_props(schema: dict, work_id: int, work_url: str, data: dict):
     """
     Only write existing properties.
-    Platform: you said you won't input it; we auto set "猫耳" (safe).
+    Platform: always set "猫耳".
     """
     props = {}
 
@@ -448,8 +446,6 @@ def build_props(schema: dict, work_id: int, work_url: str, data: dict, current_p
             props[name] = payload
 
     put("Title", {"title": [{"text": {"content": data.get("title") or f"猫耳-{work_id}"}}]})
-
-    # Always set Platform to 猫耳 (you only have one option)
     put("Platform", {"select": {"name": "猫耳"}})
 
     put("Work ID", {"rich_text": [{"text": {"content": str(work_id)}}]})
@@ -490,9 +486,8 @@ def main():
             print("  Tip: 直接贴猫耳剧集详情页 URL（含 /mdrama/数字）")
             continue
 
-        # Decide update based on current row's is_serial + last_sync
-        if not should_update(row.get("is_serial_current", True), row.get("last_sync_start", "")):
-            print(f"[{idx}/{len(rows)}] skip (fresh) {work_id}")
+        if not should_update(row.get("is_serial_current", False), row.get("last_sync_start", "")):
+            print(f"[{idx}/{len(rows)}] skip (policy) {work_id} serial_checked={row.get('is_serial_current', False)}")
             continue
 
         data = maoer_fetch(work_id)
@@ -502,13 +497,18 @@ def main():
         if override:
             data["cv_text"] = override
 
-        props = build_props(schema, work_id, work_url, data, current_platform=row.get("platform", ""))
+        props = build_props(schema, work_id, work_url, data)
 
-        # Notion update with retry
         notion_update_page(page_id, props, cover_url=data.get("cover_url"))
 
-        print(f"[{idx}/{len(rows)}] updated {work_id} {data.get('title')} "
-              f"count={data.get('latest_count')} serial={data.get('is_serial')}")
+        print(
+            f"[{idx}/{len(rows)}] updated {work_id} {data.get('title')} "
+            f"count={data.get('latest_count')} serial_api={data.get('is_serial')}"
+        )
+
+        # small jitter to be polite
+        time.sleep(0.6 + random.random() * 0.8)
+
 
 if __name__ == "__main__":
     main()
