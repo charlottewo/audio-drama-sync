@@ -160,12 +160,8 @@ def notion_query_rows_target():
             work_url = _get_prop_text(props.get("Work URL")).strip()
             work_id_text = _get_prop_text(props.get("Work ID")).strip()
             platform = _get_prop_text(props.get("Platform")).strip()
-
             main_cv_override = _get_prop_text(props.get("Main CV Override")).strip()
-
             last_sync_start = _get_prop_date_start(props.get("Last Sync"))
-
-            # IMPORTANT: use checkbox bool directly
             is_serial = _get_prop_checkbox(props.get("Is Serial"))
 
             rows.append(
@@ -190,9 +186,12 @@ def notion_query_rows_target():
 def _request_with_retry(method: str, url: str, *, headers=None, json=None, params=None, timeout=30):
     """
     Retry for:
-    - 502/503/504
     - 429 (respect Retry-After)
+    - 502/503/504
     Network errors also retry.
+
+    NOTE:
+    - 403 does NOT retry here; caller decides how to handle it.
     """
     for attempt in range(1, MAX_RETRIES + 1):
         try:
@@ -260,8 +259,22 @@ def maoer_headers(work_id: int):
     return h
 
 
-def maoer_get_drama(work_id: int) -> dict:
-    r = requests.get(GET_DRAMA, params={"drama_id": work_id}, headers=maoer_headers(work_id), timeout=30)
+def maoer_get_drama(work_id: int) -> dict | None:
+    r = _request_with_retry(
+        "GET",
+        GET_DRAMA,
+        params={"drama_id": work_id},
+        headers=maoer_headers(work_id),
+        timeout=30,
+    )
+
+    if r.status_code == 403:
+        print(
+            f"MAOER getdrama 403 (forbidden). work_id={work_id}. "
+            f"cookie={'set' if bool(MISSEVAN_COOKIE) else 'EMPTY'}"
+        )
+        return None
+
     if r.status_code != 200:
         print("MAOER getdrama HTTP", r.status_code, r.text[:200])
     r.raise_for_status()
@@ -273,13 +286,22 @@ def maoer_get_drama(work_id: int) -> dict:
     return {"drama": drama or {}, "cvs": cvs or []}
 
 
-def maoer_get_episode_details(work_id: int) -> dict:
-    r = requests.get(
+def maoer_get_episode_details(work_id: int) -> dict | None:
+    r = _request_with_retry(
+        "GET",
         GET_EPISODE_DETAILS,
         params={"drama_id": work_id, "p": 1, "page_size": 10},
         headers=maoer_headers(work_id),
         timeout=30,
     )
+
+    if r.status_code == 403:
+        print(
+            f"MAOER episode_details 403 (forbidden). work_id={work_id}. "
+            f"cookie={'set' if bool(MISSEVAN_COOKIE) else 'EMPTY'}"
+        )
+        return None
+
     if r.status_code != 200:
         print("MAOER episode_details HTTP", r.status_code)
         print("MAOER head:", r.text[:300])
@@ -364,9 +386,14 @@ def pick_main_cvs(cvs: list, k: int = 4) -> str:
 # =========================
 # Fetch + parse
 # =========================
-def maoer_fetch(work_id: int) -> dict:
+def maoer_fetch(work_id: int) -> dict | None:
     meta = maoer_get_drama(work_id)
+    if meta is None:
+        return None
+
     detail = maoer_get_episode_details(work_id)
+    if detail is None:
+        return None
 
     drama = meta.get("drama", {})
     cvs = meta.get("cvs", [])
@@ -414,17 +441,16 @@ def parse_work_id(work_url: str, fallback: str):
 
 def should_update(is_serial_checked: bool, last_sync_start: str) -> bool:
     """
-    New Strategy (your requirement):
+    Strategy:
     - Last Sync empty -> update immediately
     - Else: ONLY update when Is Serial is checked AND last_sync >= 7 days
-    - If not serial (unchecked) -> never update (unless last sync is empty / unparseable)
+    - If not serial (unchecked) -> never update
     """
     if not last_sync_start:
         return True
 
     dt = _parse_iso_dt(last_sync_start)
     if not dt:
-        # can't parse -> treat as needs update to fix the bad value
         return True
 
     if not is_serial_checked:
@@ -471,6 +497,9 @@ def main():
     notion_healthcheck()
     schema = notion_get_db_schema()
 
+    if not MISSEVAN_COOKIE:
+        print("WARN: MISSEVAN_COOKIE is EMPTY. Maoer requests may 403/402.")
+
     rows = notion_query_rows_target()
     print("Notion target rows:", len(rows))
 
@@ -491,8 +520,10 @@ def main():
             continue
 
         data = maoer_fetch(work_id)
+        if data is None:
+            print(f"[{idx}/{len(rows)}] skip (maoer forbidden/failed) {work_id}")
+            continue
 
-        # Manual override CV has highest priority
         override = (row.get("main_cv_override") or "").strip()
         if override:
             data["cv_text"] = override
@@ -506,7 +537,6 @@ def main():
             f"count={data.get('latest_count')} serial_api={data.get('is_serial')}"
         )
 
-        # small jitter to be polite
         time.sleep(0.6 + random.random() * 0.8)
 
 
